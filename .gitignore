@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Raw telemetry recordings — large and personal; not for the public repo.
+# Publish setups via `f1coach publish` -> setups/*.json instead.
+laps/
+*.jsonl
+
+# OS
+.DS_Store
+
+# Local working files
+racing.json
+austria_record_setup.json

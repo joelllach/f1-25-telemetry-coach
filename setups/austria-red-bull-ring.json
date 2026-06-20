@@ -1,0 +1,44 @@
+{
+  "track": "Austria (Red Bull Ring)",
+  "game": "F1 25",
+  "lap_record": "1:06.568",
+  "conditions": {
+    "track_temp_c": 36,
+    "air_temp_c": 24,
+    "weather": "clear"
+  },
+  "setup": {
+    "front_wing": 39,
+    "rear_wing": 30,
+    "on_throttle_diff": 100,
+    "off_throttle_diff": 30,
+    "front_camber": -3.5,
+    "rear_camber": -2.0,
+    "front_toe": 0.13,
+    "rear_toe": 0.1,
+    "front_arb": 6,
+    "rear_arb": 17,
+    "front_ride_height": 20,
+    "rear_ride_height": 46,
+    "brake_pressure": 90,
+    "brake_bias": 50,
+    "tyre_pressures": [
+      26.5,
+      26.5,
+      29.5,
+      29.5
+    ]
+  },
+  "tuning_notes": [
+    "New PB, beat 1:06.701 by 0.133s \u2014 telemetry-driven setup change.",
+    "Brake pressure 95->90 + bias 51->50 killed T3 front lock-up (slip ratio -0.293 -> -0.085), +10 km/h T3 apex speed.",
+    "Rear ARB 20->17 + off-throttle diff 20->30 stabilized the T2 hairpin rear-snap.",
+    "Gears: T1 4th, hairpin 2nd, T4 3rd; short-shift to 6th into the final complex."
+  ],
+  "gears": {
+    "T1": "4th",
+    "hairpin (T3)": "2nd",
+    "T4": "3rd",
+    "final complex": "short-shift to 6th"
+  }
+}
