@@ -42,10 +42,13 @@ from .analysis import Lap, fmt_ms
 from .storage import write_lap, append_index, LapMeta
 from . import packets as pk
 
-# 4 laps at 60 Hz, up to 120s each = 28,800 frames.  We keep a bit more.
-_DEQUE_MAXLEN = 30_000
+# 4 laps at 60 Hz, up to 120s each = 28,800 frames.  We keep more to handle
+# garage/menu time — but critically we SKIP stationary frames (speed=0, dist
+# unchanged) so garage time doesn't evict real driving data from the buffer.
+_DEQUE_MAXLEN = 50_000     # ~14 min of actual driving at 60Hz
 _RESET_JUMP_M = 50.0       # lapDistance forward jump threshold for reset detection
 _RESET_DIST_JUMP_M = 50.0  # same value, aliased for clarity
+_MIN_SPEED_TO_BUFFER = 5   # km/h — frames below this are not stored (garage/menu)
 
 
 class LapBuffer:
@@ -60,8 +63,9 @@ class LapBuffer:
         self._prev_last_lap_ms: int = 0    # last known value of last_lap_ms
         self._prev_dist: float | None = None
         self._reset_count: int = 0
-        self._lap_start_time: float = 0.0  # session_time of first frame of current lap
+        self._lap_start_time: float = 0.0  # session_time of lap start (updated on line crossing)
         self._sealed: int = 0              # count of laps sealed this session
+        self._prev_lap_num: int = -1       # for detecting lap_num change as backup
 
         self.index_path = os.path.join(laps_dir, "index.jsonl")
         self.hot_path = os.path.join(laps_dir, "hot.jsonl")
@@ -76,6 +80,20 @@ class LapBuffer:
 
     def add(self, f: Frame) -> None:
         """Process one frame from the listener."""
+        # --- lap completion detection (always check, even for stationary frames) ---
+        # last_lap_ms can change while the car is on the slow-down lap or in pit.
+        # We must check it before the speed filter below.
+        if (f.last_lap_ms > 0
+                and f.last_lap_ms != self._prev_last_lap_ms):
+            self._seal_lap(f.last_lap_ms, f)
+            self._prev_last_lap_ms = f.last_lap_ms
+            self._reset_count = 0
+            self._lap_start_time = f.session_time
+
+        # --- skip stationary/menu frames — don't let garage time evict lap data ---
+        if f.speed < _MIN_SPEED_TO_BUFFER:
+            return
+
         # --- reset detection (forward jump in lapDistance, same last_lap_ms) ---
         if (self._prev_dist is not None
                 and f.lap_distance - self._prev_dist > _RESET_DIST_JUMP_M
@@ -83,16 +101,6 @@ class LapBuffer:
             self._reset_count += 1
 
         self._prev_dist = f.lap_distance
-
-        # --- lap completion detection ---
-        if (f.last_lap_ms > 0
-                and f.last_lap_ms != self._prev_last_lap_ms):
-            # Seal: extract all buffered frames belonging to the lap that just finished
-            self._seal_lap(f.last_lap_ms, f)
-            self._prev_last_lap_ms = f.last_lap_ms
-            self._reset_count = 0
-            # Mark start of the NEW lap by session_time — immune to deque rolling
-            self._lap_start_time = f.session_time
 
         self._buf.append(f)
         self._write_hot(f)
@@ -129,11 +137,47 @@ class LapBuffer:
             os.unlink(self.pending_path)
 
     def _seal_lap(self, lap_time_ms: int, trigger_frame: Frame) -> None:
-        """Extract current lap frames, write checkpoint, then final .lap file."""
-        # Collect frames from the deque whose session_time >= lap start.
-        # Using session_time is immune to the deque rolling — an absolute index
-        # would drift as old frames are evicted from the front of the deque.
-        frames = [f for f in self._buf if f.session_time >= self._lap_start_time]
+        """Extract the flying lap frames, write checkpoint, then final .lap file.
+
+        Algorithm (exactly as intended):
+          Work backward through the ring buffer until we hit lapDistance near zero
+          — that is where the flying lap started (the last time the car crossed
+          the start/finish line). Take everything from that point to now.
+
+        This is immune to:
+          - Mid-session recorder restarts (we use lapDistance geometry, not time)
+          - Reset fragments before the lap started (discarded — before dist=0)
+          - Ring buffer rolling (list snapshot, then index walk)
+        """
+        buf_list = list(self._buf)
+        if not buf_list:
+            return
+
+        # Walk backward to find the genuine lap start — the last time the car
+        # crossed the start/finish line going INTO this lap.
+        #
+        # A genuine crossing looks like: prev frame dist > 3000m (near end of
+        # circuit), next frame dist < 200m (just past the line). Resets that
+        # land somewhere mid-circuit don't match this pattern.
+        #
+        # We find the LAST such crossing in the buffer — that's where this lap
+        # started. Everything from that frame onward is the lap.
+        n = len(buf_list)
+        lap_start_idx = 0  # default: use all buffered frames
+
+        # Walk backward to find the most recent genuine start/finish crossing:
+        # a frame where dist < 200m AND the previous frame had dist > 3000m.
+        # This means the car crossed the line (dist wrapped from near-end to zero)
+        # rather than being reset to mid-circuit or the buffer just starting there.
+        # We require i > 0 so we always have a previous frame to compare.
+        for i in range(n - 1, 0, -1):
+            curr_d = buf_list[i].lap_distance
+            prev_d = buf_list[i - 1].lap_distance
+            if curr_d < 200 and prev_d > 3000:
+                lap_start_idx = i
+                break
+
+        frames = buf_list[lap_start_idx:]
         if not frames:
             return
 
@@ -213,8 +257,10 @@ class LapBuffer:
         Within a lap we append.  The file is intentionally ephemeral — it is
         not used for analysis, only for live 'tail -f' monitoring.
         """
-        if f.session_time == self._lap_start_time:
-            # First frame of a new lap — truncate the file
+        # Detect new lap start: lapDistance wrapped from near-end to near-zero
+        if (self._prev_dist is not None
+                and f.lap_distance < 200
+                and self._prev_dist > 3000):
             open(self.hot_path, "w").close()
 
         rec = {
