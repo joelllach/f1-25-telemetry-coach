@@ -345,6 +345,23 @@ def cmd_publish(args):
     print("  Review the file, then copy it to the site's static/racing.json when ready.")
 
 
+def cmd_write(args):
+    """Write raw deduplicated telemetry to raw.jsonl (new architecture)."""
+    from .writer import TelemetryWriter
+    w = TelemetryWriter(laps_dir=args.laps_dir, port=args.port)
+    w.run()
+
+
+def cmd_process(args):
+    """Extract .lap files from raw.jsonl (new architecture)."""
+    from .processor import process_once, watch
+    if args.watch is not None:
+        watch(laps_dir=args.laps_dir, interval=args.watch)
+    else:
+        n = process_once(laps_dir=args.laps_dir, verbose=True)
+        print(f"[process] {n} new lap(s) written")
+
+
 def cmd_laps(args):
     """List laps from index.jsonl with times, flags, and optional target gap."""
     from .storage import read_index
@@ -398,10 +415,20 @@ def main():
                    help="print the JSON summary instead of calling Claude")
     d.set_defaults(func=cmd_debrief)
 
-    r = sub.add_parser("record", help="record to per-lap .lap binary files (new architecture)")
+    r = sub.add_parser("record", help="[LEGACY] record to per-lap .lap files via LapBuffer")
     r.add_argument("--laps-dir", default="laps",
                    help="directory for .lap files + index.jsonl (default: laps/)")
     r.set_defaults(func=cmd_record)
+
+    wr = sub.add_parser("write", help="write raw deduplicated telemetry to raw.jsonl (new arch)")
+    wr.add_argument("--laps-dir", default="laps", help="directory containing raw.jsonl")
+    wr.set_defaults(func=cmd_write)
+
+    pr = sub.add_parser("process", help="extract .lap files from raw.jsonl (new arch)")
+    pr.add_argument("--laps-dir", default="laps")
+    pr.add_argument("--watch", nargs="?", const=60, type=int, metavar="SECONDS",
+                    help="run every N seconds (default 60) until Ctrl-C")
+    pr.set_defaults(func=cmd_process)
 
     ls = sub.add_parser("laps", help="list completed laps from index.jsonl")
     ls.add_argument("laps_dir", nargs="?", default="laps",
