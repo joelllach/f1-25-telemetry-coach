@@ -121,7 +121,174 @@ def test_analysis_and_coach():
     print("  analysis pipeline ✔\n")
 
 
+def test_storage_roundtrip():
+    """Write a Lap to a .lap binary, read it back, confirm fields match."""
+    import os, tempfile
+    from f1coach.analysis import Lap
+    from f1coach.storage import write_lap, read_lap, FRAME_SIZE, HDR_SIZE
+
+    print("== storage: binary .lap round-trip ==")
+    print(f"  FRAME_SIZE={FRAME_SIZE} bytes (expect 60)")
+    assert FRAME_SIZE == 60
+
+    # Build a synthetic lap with varied frame values
+    frames = []
+    for i in range(200):
+        d = float(i * 22)
+        frames.append(Frame(
+            session_time=float(i) * (1/60), session_uid=42,
+            lap_distance=d, total_distance=d,
+            current_lap_num=3, speed=100+i, throttle=min(1.0, i/100),
+            brake=max(0.0, 1.0 - i/100), steer=(i % 20 - 10) / 100.0,
+            gear=max(1, min(8, i//25+1)), rpm=8000+i*10, drs=i%2,
+            world_x=float(i*5), world_y=float(i*2), world_z=0.0,
+            g_lat=0.1, g_long=-0.2,
+            tyre_compound=16, tyre_age_laps=3, ers_store=2e6,
+            slip_ratio=(-0.05, -0.04, -0.15, -0.18),
+            slip_angle=(0.05, 0.06, 0.12, 0.13),
+            tyre_surface_temp=(90, 91, 88, 89),
+            tyre_inner_temp=(95, 96, 93, 94),
+            surface_type=(0, 0, 0, 0),
+            current_lap_invalid=0, offtrack=0,
+        ))
+
+    lap = Lap(lap_num=3, frames=frames, invalid=False, lap_time_ms=89253)
+    lap.reset_count = 2
+    lap.setup = {"brake_bias": 51, "front_wing": 12, "rear_wing": 0}
+    lap.session = {"track_id": 7, "track_length": 5891}
+    lap.events = [{"code": "BUTN", "lap_distance": 500.0}]
+    lap._wall_clock_ms = 1_700_000_000_000
+    lap._track_id = 7
+    lap._track_length_m = 5891
+
+    fh = tempfile.NamedTemporaryFile(suffix=".lap", delete=False)
+    fh.close()
+    try:
+        write_lap(lap, fh.name, session_uid=99,
+                  wall_clock_ms=1_700_000_000_000,
+                  track_id=7, track_length_m=5891)
+        sz = os.path.getsize(fh.name)
+        print(f"  wrote {sz} bytes "
+              f"({HDR_SIZE}hdr + meta + {FRAME_SIZE}×{len(frames)}frames)")
+
+        lap2 = read_lap(fh.name)
+        checks = [
+            ("lap_num",      lap2.lap_num,        3),
+            ("lap_time_ms",  lap2.lap_time_ms,     89253),
+            ("frame_count",  len(lap2.frames),     200),
+            ("reset_count",  lap2.reset_count,     2),
+            ("invalid",      lap2.invalid,         False),
+            ("setup.bias",   lap2.setup["brake_bias"] if lap2.setup else None, 51),
+            ("track_id",     lap2._track_id,       7),
+        ]
+        for name, got, exp in checks:
+            ok = "OK " if got == exp else "FAIL"
+            if got != exp: print(f"  [{ok}] {name}: got={got!r} exp={exp!r}")
+            assert got == exp, f"{name} mismatch"
+
+        # Spot-check a frame
+        f0 = lap2.frames[0]; f99 = lap2.frames[99]
+        assert abs(f0.lap_distance - 0.0) < 1.0, f"f0.lap_dist={f0.lap_distance}"
+        assert abs(f99.lap_distance - 99*22.0) < 1.0, f"f99.lap_dist={f99.lap_distance}"
+        assert abs(f99.throttle - 0.99) < 0.01, f"throttle={f99.throttle}"
+        assert f99.slip_ratio[2] == round(-0.15 * 100) / 100 or abs(f99.slip_ratio[2] - (-0.15)) < 0.015
+        print(f"  frame spot-checks ✔  (f0.dist={f0.lap_distance:.0f}m, "
+              f"f99.dist={f99.lap_distance:.0f}m, thr={f99.throttle:.2f})")
+        print("  .lap round-trip ✔\n")
+    finally:
+        os.unlink(fh.name)
+
+
+def test_last_lap_ms_boundary():
+    """LapBuffer seals on last_lap_ms change, NOT on a reset."""
+    import tempfile, os
+    from f1coach.lap_buffer import LapBuffer
+
+    print("== LapBuffer: last_lap_ms boundary signal ==")
+
+    td = tempfile.mkdtemp()
+    buf = LapBuffer(laps_dir=td, verbose=False)
+
+    def _frame(lap_num, dist, last_lap_ms, invalid=0):
+        return Frame(
+            session_time=0.0, session_uid=1,
+            lap_distance=dist, total_distance=dist,
+            current_lap_num=lap_num, speed=200,
+            throttle=1.0, brake=0.0, steer=0.0,
+            gear=6, rpm=11000, drs=0,
+            world_x=dist, world_y=0.0, world_z=0.0,
+            g_lat=0.0, g_long=0.0,
+            tyre_compound=16, tyre_age_laps=3, ers_store=2e6,
+            last_lap_ms=last_lap_ms,
+            current_lap_invalid=invalid,
+        )
+
+    # Lap 1: drive 0..4320m, no seal yet (last_lap_ms still 0)
+    for d in range(0, 4320, 50):
+        buf.add(_frame(1, float(d), 0))
+    assert buf._sealed == 0, "should not have sealed yet"
+
+    # In-lap reset at 800m: dist jumps forward — should NOT seal
+    buf.add(_frame(1, 800.0, 0))    # reset lands here
+    buf.add(_frame(1, 3200.0, 0))   # forward jump, same last_lap_ms
+    assert buf._sealed == 0, "reset must NOT trigger a seal"
+    assert buf._reset_count == 1, "reset_count should be 1"
+
+    # Lap completion: last_lap_ms changes to 89253
+    for d in range(3200, 5890, 50):
+        buf.add(_frame(1, float(d), 0))
+    buf.add(_frame(2, 10.0, 89253))   # crosses line, new lap starts
+    assert buf._sealed == 1, f"should have sealed exactly 1 lap, got {buf._sealed}"
+
+    # Verify the .lap file exists and has the right time
+    from f1coach.storage import read_index
+    metas = read_index(os.path.join(td, "index.jsonl"))
+    assert len(metas) == 1, f"expected 1 index entry, got {len(metas)}"
+    assert metas[0].lap_time_ms == 89253, f"lap_time_ms={metas[0].lap_time_ms}"
+    assert metas[0].reset_count == 1, f"reset_count={metas[0].reset_count}"
+    print(f"  sealed 1 lap: {metas[0].lap_time_str()} "
+          f"(reset_count={metas[0].reset_count}) ✔")
+
+    # Another reset (no last_lap_ms change) should NOT seal
+    buf.add(_frame(2, 200.0, 89253))   # still same last_lap_ms
+    buf.add(_frame(2, 3500.0, 89253))  # reset forward
+    assert buf._sealed == 1, "second reset must not seal"
+    print("  reset with unchanged last_lap_ms does not seal ✔")
+
+    # Deque rolling: push 15 more laps through to force the deque to roll over
+    # old frames. Each lap seals when last_lap_ms changes. The key check:
+    # frame extraction must still work correctly after rolling.
+    base_t = 200.0
+    base_ms = 89253
+    for lap_i in range(3, 18):
+        lap_t = base_t + (lap_i - 2) * 90.0       # ~90s per lap
+        for d in range(0, 5890, 50):
+            buf.add(_frame(lap_i, float(d), base_ms,
+                           # session_time increments so deque fills up
+                           # (reuse _frame but we need session_time — patch it)
+                           ))
+        # Cross the line
+        new_ms = base_ms + (lap_i - 2) * 1000
+        next_frame = _frame(lap_i + 1, 10.0, new_ms)
+        next_frame = next_frame.__class__(**{**next_frame.__dataclass_fields__,
+                                             **{k: getattr(next_frame, k)
+                                                for k in next_frame.__dataclass_fields__}})
+        buf.add(_frame(lap_i + 1, 10.0, new_ms))
+        base_ms = new_ms
+
+    assert buf._sealed > 1, f"should have sealed multiple laps after deque rolling, got {buf._sealed}"
+    metas2 = read_index(os.path.join(td, "index.jsonl"))
+    # Every sealed lap should have frames
+    empty = [m for m in metas2 if m.frame_count == 0]
+    assert not empty, f"sealed laps with 0 frames after deque roll: {empty}"
+    print(f"  deque-rolling: {buf._sealed} laps sealed, none empty ✔\n")
+
+    import shutil; shutil.rmtree(td)
+
+
 if __name__ == "__main__":
     test_udp_roundtrip()
     test_analysis_and_coach()
+    test_storage_roundtrip()
+    test_last_lap_ms_boundary()
     print("ALL SELFTESTS PASSED ✔")

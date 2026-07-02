@@ -81,6 +81,11 @@ current value and a specific direction/amount to try. If "conditions" is present
 flashback, that confirms a reset. Tyre temps in the corner data flag whether the
 car was in the grip window.
 
+The lap's "track" field is the authoritative circuit name. If it is null/absent,
+say "this track" and refer to corners by their distance-from-start — do NOT guess
+the circuit or invent corner names (e.g. from lap length). Never name a track or
+named corner unless the "track" field provides it.
+
 Keep it to the 3-4 highest-value points. End with one single thing to focus on
 next lap. Be direct and encouraging, like a race engineer on the radio."""
 
@@ -89,11 +94,18 @@ def build_summary(cur: Lap, ref: Lap | None, step_m: float = 5.0,
                   target_ms: int | None = None) -> dict:
     cur_grid = resample(cur, step_m)
     cur_corners = detect_corners(cur_grid)
+    # resolve the real track name from the session, so the model never guesses it
+    track = None
+    sess = getattr(cur, "session", None)
+    if sess:
+        from f1coach import packets as pk
+        track = pk.TRACK_IDS.get(sess.get("track_id"))
     summary = {
         "current_lap": {
             "lap_num": cur.lap_num,
             "lap_time": fmt_ms(cur.lap_time_ms),
             "lap_time_ms": cur.lap_time_ms,
+            "track": track,  # may be None if unknown; do NOT infer from length
             "invalid": cur.invalid,
             "reset_count": cur.reset_count,
             "was_reset": cur.was_reset,

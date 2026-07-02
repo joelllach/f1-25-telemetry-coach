@@ -71,8 +71,11 @@ class TelemetryListener:
         self.raw_setup_packet: bytes | None = None  # first CarSetups packet, for offset debugging
         self.latest_session: dict | None = None
         self.latest_damage: dict | None = None
-        # event hook: called with (event_code, frame) when an Event packet arrives
+        # hooks
         self.on_event = None
+        # on_context(setup=..., session=...) — called when setup/session packets arrive
+        # so LapBuffer can tag in-progress frames with the latest context
+        self.on_context = None
 
     def open(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -154,11 +157,15 @@ class TelemetryListener:
             sd = pk.parse_setup_player(data, pidx)
             if sd:
                 self.latest_setup = pk.sanitize_setup(sd)
+                if self.on_context:
+                    self.on_context(setup=self.latest_setup)
         elif hdr.packet_id == pk.PID_SESSION:
             si = pk.parse_session(data)
             if si:
                 import dataclasses as _dc
                 self.latest_session = _dc.asdict(si)
+                if self.on_context:
+                    self.on_context(session=self.latest_session)
         elif hdr.packet_id == pk.PID_CAR_DAMAGE:
             dd = pk.parse_damage_player(data, pidx)
             if dd:

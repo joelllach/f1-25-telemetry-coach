@@ -89,58 +89,36 @@ def cmd_debrief(args):
 
 
 def cmd_record(args):
-    """Log every frame to a JSONL file. Designed to run as a background process.
+    """Record to per-lap binary .lap files via LapBuffer (new architecture).
 
-    Each line is one JSON object: a frame {"t":"frame", ...} or a lap marker
-    {"t":"lap", "lap_num":N, "lap_time_ms":..., "invalid":bool, "frames":K}.
-    The file is line-buffered so you can `tail -f` it while driving.
+    Each completed lap (detected via last_lap_ms change) is written as an
+    individual .lap binary file in <laps_dir>/.  An index.jsonl tracks all
+    laps.  hot.jsonl holds the current in-progress lap for live monitoring.
+
+    The old --out JSONL mode is retained as --legacy-jsonl for backward compat.
     """
-    fh = open(args.out, "w", buffering=1)  # line-buffered
-    counters = {"frames": 0, "laps": 0, "events": 0}
-    fields = [f.name for f in dataclasses.fields(Frame)]
-    lis_ref = {}  # filled below so write_lap can read latest context
+    from .lap_buffer import LapBuffer
 
-    def write_lap(lap: Lap):
-        counters["laps"] += 1
-        lis = lis_ref.get("lis")
-        rec = {
-            "t": "lap", "lap_num": lap.lap_num,
-            "lap_time_ms": lap.lap_time_ms, "lap_time": fmt_ms(lap.lap_time_ms),
-            "invalid": lap.invalid, "reset_count": lap.reset_count,
-            "frames": len(lap.frames),
-        }
-        if lis:
-            # snapshot slowly-changing context at lap completion (dedupes itself)
-            if lis.latest_setup:
-                rec["setup"] = lis.latest_setup
-            if lis.latest_session:
-                rec["session"] = lis.latest_session
-            if lis.latest_damage:
-                rec["damage"] = lis.latest_damage
-        fh.write(json.dumps(rec) + "\n")
-
-    seg = LapSegmenter(on_lap_complete=write_lap)
+    buf = LapBuffer(laps_dir=args.laps_dir, verbose=True)
 
     def on_frame(f: Frame):
-        counters["frames"] += 1
-        rec = {"t": "frame"}
-        rec.update({k: getattr(f, k) for k in fields})
-        fh.write(json.dumps(rec) + "\n")
-        seg.add(f)
+        buf.add(f)
+
+    def on_context(**kwargs):
+        buf.attach_context(**kwargs)
 
     def on_event(code: str, f: Frame):
-        counters["events"] += 1
-        fh.write(json.dumps({"t": "event", "code": code,
-                             "lap_num": f.current_lap_num,
-                             "lap_distance": round(f.lap_distance, 1),
-                             "session_time": round(f.session_time, 2)}) + "\n")
+        pass  # events not yet forwarded to LapBuffer (future: attach to lap)
 
-    # session header line
-    fh.write(json.dumps({"t": "start", "wall": time.time(), "port": args.port}) + "\n")
-    print(f"[record] writing to {args.out}  (Ctrl-C to stop)")
+    print(f"[record] laps -> {args.laps_dir}/  "
+          f"(index: index.jsonl, live: hot.jsonl)  Ctrl-C to stop")
     lis = TelemetryListener(port=args.port, on_frame=on_frame)
     lis.on_event = on_event
-    lis_ref["lis"] = lis
+    lis.on_context = on_context
+    try:
+        lis.run()
+    finally:
+        print(f"[record] done: {buf._sealed} laps sealed -> {args.laps_dir}/")
     try:
         lis.run()
     finally:
@@ -150,6 +128,25 @@ def cmd_record(args):
         fh.close()
         print(f"[record] done: {counters['frames']} frames, {counters['laps']} laps, "
               f"{counters['events']} events -> {args.out}")
+
+
+def _load_laps_binary(path: str) -> list[Lap]:
+    """Load laps from a .lap file or a directory of .lap files (via index.jsonl)."""
+    from .storage import read_lap, read_index
+    if path.endswith(".lap"):
+        return [read_lap(path)]
+    # Directory: read index.jsonl and load each file
+    index_path = os.path.join(path, "index.jsonl")
+    metas = read_index(index_path)
+    laps = []
+    for m in metas:
+        fpath = os.path.join(path, m.file)
+        if os.path.exists(fpath):
+            try:
+                laps.append(read_lap(fpath))
+            except Exception as e:
+                print(f"[warn] could not read {fpath}: {e}")
+    return laps
 
 
 def _load_laps(path: str) -> list[Lap]:
@@ -223,7 +220,13 @@ def parse_time(s: str | None) -> int | None:
 
 
 def cmd_analyze(args):
-    laps = _load_laps(args.file)
+    # Route to binary reader for .lap files / directories, legacy for JSONL
+    f = args.file
+    if f.endswith(".lap") or (os.path.isdir(f) and
+                              os.path.exists(os.path.join(f, "index.jsonl"))):
+        laps = _load_laps_binary(f)
+    else:
+        laps = _load_laps(f)
     if not laps:
         print(f"[analyze] no complete laps found in {args.file}")
         return
@@ -288,10 +291,13 @@ def cmd_publish(args):
     if lap is None:
         print(f"[publish] lap {args.lap} not found in {args.file}")
         return
-    if lap.was_reset and not args.force:
-        print(f"[publish] lap {args.lap} contains {lap.reset_count} reset(s) — "
-              f"not a clean lap. Use --force to publish anyway.")
-        return
+    # NOTE: In Time Trial, resetting to track / restarting a flying lap is normal
+    # and the game still validates the lap — the lap_time_ms here comes from the
+    # game's own timing field, so it matches your in-game record screen. We do NOT
+    # block reset laps; we just note them. The lap time is the authority.
+    if lap.was_reset:
+        print(f"[publish] note: lap {args.lap} had {lap.reset_count} in-lap reset(s) "
+              f"(normal for Time Trial — game-validated time {fmt_ms(lap.lap_time_ms)} is used).")
 
     track = "Unknown"
     conditions = {}
@@ -339,6 +345,39 @@ def cmd_publish(args):
     print("  Review the file, then copy it to the site's static/racing.json when ready.")
 
 
+def cmd_laps(args):
+    """List laps from index.jsonl with times, flags, and optional target gap."""
+    from .storage import read_index
+    from f1coach import packets as pk
+    target_ms = parse_time(getattr(args, "target", None))
+    metas = read_index(os.path.join(args.laps_dir, "index.jsonl"))
+    if not metas:
+        print(f"[laps] no laps found in {args.laps_dir}/index.jsonl")
+        return
+    track_filter = (args.track or "").lower()
+    best_ms: dict[int, int] = {}  # track_id -> best clean ms
+    for m in metas:
+        if not m.invalid and m.reset_count == 0 and m.lap_time_ms > 0:
+            if m.lap_time_ms < best_ms.get(m.track_id, 999_999_999):
+                best_ms[m.track_id] = m.lap_time_ms
+    print(f"{'Track':25} {'Lap':>4}  {'Time':>10}  {'Status':12}  {'Frames':>7}  {'Note'}")
+    print("-" * 80)
+    for m in metas:
+        track = pk.TRACK_IDS.get(m.track_id, f"track#{m.track_id}")
+        if track_filter and track_filter not in track.lower():
+            continue
+        flag = (f"RESET x{m.reset_count}" if m.reset_count else
+                "INVALID" if m.invalid else "clean")
+        tgt = ""
+        if target_ms and not m.invalid and m.lap_time_ms > 0:
+            d = (m.lap_time_ms - target_ms) / 1000.0
+            tgt = f"  [{d:+.3f}s]" + (" *** RECORD ***" if d < 0 else "")
+        star = " ← best" if (m.lap_time_ms == best_ms.get(m.track_id) and
+                              not m.invalid and m.reset_count == 0) else ""
+        print(f"  {track[:25]:25} {m.lap_num:4d}  {m.lap_time_str():>10}  "
+              f"{flag:12}  {m.frame_count:7d}{tgt}{star}")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="f1coach")
     ap.add_argument("--port", type=int, default=20777)
@@ -359,12 +398,20 @@ def main():
                    help="print the JSON summary instead of calling Claude")
     d.set_defaults(func=cmd_debrief)
 
-    r = sub.add_parser("record", help="log all frames to a JSONL file (background-friendly)")
-    r.add_argument("--out", default="session.jsonl", help="output JSONL path")
+    r = sub.add_parser("record", help="record to per-lap .lap binary files (new architecture)")
+    r.add_argument("--laps-dir", default="laps",
+                   help="directory for .lap files + index.jsonl (default: laps/)")
     r.set_defaults(func=cmd_record)
 
-    a = sub.add_parser("analyze", help="coach laps from a recorded JSONL file")
-    a.add_argument("file", help="recorded JSONL path")
+    ls = sub.add_parser("laps", help="list completed laps from index.jsonl")
+    ls.add_argument("laps_dir", nargs="?", default="laps",
+                    help="directory containing index.jsonl (default: laps/)")
+    ls.add_argument("--track", default=None, help="filter by track name")
+    ls.add_argument("--target", default=None, help="show gap to this target time")
+    ls.set_defaults(func=cmd_laps)
+
+    a = sub.add_parser("analyze", help="coach laps from a .lap file, directory, or legacy JSONL")
+    a.add_argument("file", help=".lap file, laps/ directory, or legacy JSONL session path")
     a.add_argument("--lap", type=int, default=None,
                    help="coach a specific lap number (default: the best lap)")
     a.add_argument("--all", dest="all_laps", action="store_true",

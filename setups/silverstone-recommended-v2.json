@@ -1,0 +1,55 @@
+{
+  "track": "Silverstone",
+  "based_on_record": "1:29.253",
+  "date": "2026-06-24",
+  "label": "Balanced v2 \u2014 fix the understeer, protect the pace",
+  "rationale": "Current setup (rear_wing=0) is a leaderboard trick that works but leaves the car on a knife-edge. These changes tighten the handling window while recovering most of the lap time through better corner entry \u2014 aim is sub-1:29.0.",
+  "changes": [
+    {
+      "field": "front_arb",
+      "from": 8,
+      "to": 6,
+      "why": "ARB=8 (max) worsens front lock-up under braking \u2014 dropping to 6 gives the tyre more compliance without losing stiffness for fast corners"
+    },
+    {
+      "field": "brake_bias",
+      "from": 51,
+      "to": 49,
+      "why": "Rear locking at C4 + front locking at C1 both point to bias slightly rearward; 49 balances both axles better"
+    },
+    {
+      "field": "rear_wing",
+      "from": 0,
+      "to": 2,
+      "why": "Adds a small amount of rear stability to fix the lap-wide understeer; costs ~0.05\u20130.1s on straights but recovers it in C1/C2 rotation"
+    },
+    {
+      "field": "on_throttle_diff",
+      "from": 100,
+      "to": 80,
+      "why": "100% fully locked diff causes rear snap on throttle in medium-speed corners \u2014 80% gives cleaner exits without losing traction drive"
+    }
+  ],
+  "full_setup": {
+    "front_wing": 12,
+    "rear_wing": 2,
+    "on_throttle_diff": 80,
+    "off_throttle_diff": 25,
+    "front_camber": -3.5,
+    "rear_camber": -2.0,
+    "front_toe": 0.01,
+    "rear_toe": 0.1,
+    "front_arb": 6,
+    "rear_arb": 15,
+    "front_ride_height": 21,
+    "rear_ride_height": 40,
+    "brake_pressure": 95,
+    "brake_bias": 49,
+    "tyre_pressures": [
+      26.5,
+      26.5,
+      29.5,
+      29.5
+    ]
+  }
+}
