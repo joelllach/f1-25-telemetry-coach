@@ -35,16 +35,37 @@ MIN_LAP_FRAMES = 100
 
 
 def _load_raw_frames(laps_dir: str) -> list[dict]:
-    """Load and merge frames from raw.jsonl + raw.prev.jsonl, sorted by st."""
+    """Load frames from raw.jsonl (+ raw.prev.jsonl), sorted by session_time.
+
+    Only loads frames from the MOST RECENT session start marker onward.
+    Each time the writer starts, it writes a {"t":"start"} line. We find
+    the last such marker and ignore everything before it — this prevents
+    old session data from polluting the current session's lap extraction.
+    """
+    # First pass: find the byte offset of the last "start" marker in raw.jsonl
+    # (raw.prev.jsonl is an older roll and always older than raw.jsonl)
+    raw_path = os.path.join(laps_dir, "raw.jsonl")
+    last_start_offset = 0
+    if os.path.exists(raw_path):
+        with open(raw_path, "rb") as f:
+            offset = 0
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    if r.get("t") == "start":
+                        last_start_offset = offset
+                except Exception:
+                    pass
+                offset += len(line)
+
     rows: list[dict] = []
     latest_setup: dict | None = None
     latest_session: dict | None = None
 
-    for fname in ("raw.prev.jsonl", "raw.jsonl"):
-        path = os.path.join(laps_dir, fname)
-        if not os.path.exists(path):
-            continue
-        with open(path, encoding="utf-8", errors="replace") as f:
+    # Load raw.jsonl from the last start marker onward
+    if os.path.exists(raw_path):
+        with open(raw_path, encoding="utf-8", errors="replace") as f:
+            f.seek(last_start_offset)
             for line in f:
                 line = line.strip()
                 if not line:
@@ -59,7 +80,6 @@ def _load_raw_frames(laps_dir: str) -> list[dict]:
                 elif t == "ctx_session":
                     latest_session = r.get("v")
                 elif t == "frame":
-                    # Carry the latest context into the frame
                     if latest_setup and "setup" not in r:
                         r["setup"] = latest_setup
                     if latest_session and "session" not in r:
@@ -163,7 +183,15 @@ def process_once(laps_dir: str = "laps", verbose: bool = True) -> int:
         print(f"[processor] {len(seals)} lap completion(s) found")
 
     written = 0
-    # Process newest first — stop when we hit one already in the index
+    # Process newest first. We use seal index (position in raw file) as the
+    # true unique key — two sessions can produce the same lap_time_ms, so
+    # matching by time+track alone is not reliable. Instead we track which
+    # seal indices have already been processed by checking the source_lap_file
+    # written into each index entry, or fall back to skipping by time+track.
+    # Simpler and correct: process ALL seals, skip ones already indexed by
+    # their (lap_time_ms, track_id) key BUT only if that key appears more than
+    # once do we risk collision — for now just process all and let write_lap
+    # be idempotent (same filename = no duplicate on disk).
     for lap_time_ms, seal_idx in reversed(seals):
         # Resolve track from context
         session = raw_rows[seal_idx].get("session") or {}
