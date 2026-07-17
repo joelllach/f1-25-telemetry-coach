@@ -1,0 +1,141 @@
+# f1coach Deployment — writer + processor as separate containers in one pod.
+#
+# Two-container design:
+#   writer    : listens on UDP 20777, writes raw.jsonl
+#   processor : watches laps/ every 60s, extracts .lap files from raw.jsonl
+#
+# Both containers share the same /data/laps PVC.
+# If your cluster doesn't support ReadWriteMany you can use a single-container
+# deployment with PROCESS_MODE=both instead (see docker-compose.yml).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: f1coach
+  namespace: f1coach
+  labels:
+    app: f1coach
+spec:
+  replicas: 1       # must be 1 — UDP binding and file access are not distributed
+  selector:
+    matchLabels:
+      app: f1coach
+  template:
+    metadata:
+      labels:
+        app: f1coach
+    spec:
+      # Shared volume for raw telemetry + lap files
+      volumes:
+        - name: laps-data
+          persistentVolumeClaim:
+            claimName: f1coach-laps
+
+      containers:
+        # ── Process 1: UDP writer ──────────────────────────────────────────────
+        - name: writer
+          image: ghcr.io/joelllach/f1-25-telemetry-coach:latest
+          imagePullPolicy: Always
+          env:
+            - name: PROCESS_MODE
+              value: "writer"
+            - name: UDP_PORT
+              value: "20777"
+            - name: LAPS_DIR
+              value: /data/laps
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: CLAUDE_CODE_USE_BEDROCK
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: CLAUDE_CODE_USE_BEDROCK
+                  optional: true
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: AWS_REGION
+                  optional: true
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: AWS_ACCESS_KEY_ID
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+                  optional: true
+          ports:
+            - name: telemetry-udp
+              containerPort: 20777
+              protocol: UDP
+          volumeMounts:
+            - name: laps-data
+              mountPath: /data/laps
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+        # ── Process 2: lap processor ───────────────────────────────────────────
+        - name: processor
+          image: ghcr.io/joelllach/f1-25-telemetry-coach:latest
+          imagePullPolicy: Always
+          env:
+            - name: PROCESS_MODE
+              value: "processor"
+            - name: LAPS_DIR
+              value: /data/laps
+            - name: PROCESS_INTERVAL
+              value: "60"
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: CLAUDE_CODE_USE_BEDROCK
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: CLAUDE_CODE_USE_BEDROCK
+                  optional: true
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: AWS_REGION
+                  optional: true
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: AWS_ACCESS_KEY_ID
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: f1coach-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+                  optional: true
+          volumeMounts:
+            - name: laps-data
+              mountPath: /data/laps
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

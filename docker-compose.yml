@@ -1,0 +1,64 @@
+# f1coach — home machine quick-start
+#
+# Usage:
+#   1. Set your Claude API credentials (choose one):
+#        export ANTHROPIC_API_KEY=sk-...          # direct Anthropic API
+#        export CLAUDE_CODE_USE_BEDROCK=1 \
+#               AWS_PROFILE=... AWS_REGION=...    # AWS Bedrock
+#
+#   2. Start:
+#        docker compose up -d
+#
+#   3. On the PS5:
+#        Settings → Telemetry → Broadcast Mode ON, Port 20777, Format 2025, Rate 60Hz
+#
+#   4. Analyze a lap after driving:
+#        docker compose exec f1coach python -m f1coach laps
+#        docker compose exec f1coach python -m f1coach analyze laps/<file>.lap
+#
+#   5. Stop:
+#        docker compose down
+
+services:
+  f1coach:
+    build: .
+    container_name: f1coach
+    restart: unless-stopped
+
+    # UDP port — the PS5 sends telemetry here.
+    # Host port can be changed if 20777 is taken on your machine.
+    ports:
+      - "20777:20777/udp"
+
+    # Lap data persists across restarts
+    volumes:
+      - laps_data:/data/laps
+
+    environment:
+      # Mode: "both" runs writer + processor in one container
+      PROCESS_MODE: both
+      UDP_PORT: "20777"
+      LAPS_DIR: /data/laps
+      PROCESS_INTERVAL: "60"   # seconds between processor runs
+
+      # Claude backend — uncomment the one you use:
+      # Direct Anthropic API:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      # AWS Bedrock (set these if using Bedrock instead):
+      CLAUDE_CODE_USE_BEDROCK: "${CLAUDE_CODE_USE_BEDROCK:-}"
+      AWS_REGION: "${AWS_REGION:-us-west-2}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+
+    # Run as non-root
+    user: "1000:1000"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  laps_data:
+    driver: local

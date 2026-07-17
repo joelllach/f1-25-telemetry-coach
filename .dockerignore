@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Lap recordings — mount as a volume, never bake into the image
+laps/
+*.jsonl
+*.lap
+racing.json
+austria_record_setup.json
+
+# Dev/test artifacts
+tools/selftest.py
+tools/fake_telemetry.py
+tools/find_setup_offsets.py
+
+# OS
+.DS_Store
+*.swp
+
+# Git
+.git/
+.gitignore
+
+# Docs
+*.md
+LICENSE

@@ -1,0 +1,16 @@
+# Persistent volume for .lap files and index.jsonl.
+# Adjust storageClassName to match your cluster (e.g. "standard", "gp2", "longhorn").
+# Both the writer and processor containers mount this at /data/laps.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: f1coach-laps
+  namespace: f1coach
+spec:
+  accessModes:
+    - ReadWriteMany    # both containers in the pod need read+write
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 5Gi    # raw.jsonl rolls at 950 MB; 5Gi holds ~5 rolls + .lap files
